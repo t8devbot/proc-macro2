@@ -1,4 +1,13 @@
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::items_after_statements,
+    clippy::non_ascii_literal,
+    clippy::octal_escapes
+)]
+
 use proc_macro2::{Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
+use std::iter;
+use std::panic;
 use std::str::{self, FromStr};
 
 #[test]
@@ -12,14 +21,24 @@ fn idents() {
 }
 
 #[test]
-#[cfg(procmacro2_semver_exempt)]
 fn raw_idents() {
     assert_eq!(
         Ident::new_raw("String", Span::call_site()).to_string(),
         "r#String"
     );
     assert_eq!(Ident::new_raw("fn", Span::call_site()).to_string(), "r#fn");
-    assert_eq!(Ident::new_raw("_", Span::call_site()).to_string(), "r#_");
+}
+
+#[test]
+#[should_panic(expected = "`r#_` cannot be a raw identifier")]
+fn ident_raw_underscore() {
+    Ident::new_raw("_", Span::call_site());
+}
+
+#[test]
+#[should_panic(expected = "`r#super` cannot be a raw identifier")]
+fn ident_raw_reserved() {
+    Ident::new_raw("super", Span::call_site());
 }
 
 #[test]
@@ -71,9 +90,24 @@ fn lifetime_number() {
 }
 
 #[test]
-#[should_panic(expected = r#""\'a#" is not a valid Ident"#)]
 fn lifetime_invalid() {
-    Ident::new("'a#", Span::call_site());
+    let result = panic::catch_unwind(|| Ident::new("'a#", Span::call_site()));
+    match result {
+        Err(box_any) => {
+            let message = box_any.downcast_ref::<String>().unwrap();
+            let expected1 = r#""\'a#" is not a valid Ident"#; // 1.31.0 .. 1.53.0
+            let expected2 = r#""'a#" is not a valid Ident"#; // 1.53.0 ..
+            assert!(
+                message == expected1 || message == expected2,
+                "panic message does not match expected string\n\
+                 \x20   panic message: `{:?}`\n\
+                 \x20expected message: `{:?}`",
+                message,
+                expected2,
+            );
+        }
+        Ok(_) => panic!("test did not panic as expected"),
+    }
 }
 
 #[test]
@@ -81,11 +115,47 @@ fn literal_string() {
     assert_eq!(Literal::string("foo").to_string(), "\"foo\"");
     assert_eq!(Literal::string("\"").to_string(), "\"\\\"\"");
     assert_eq!(Literal::string("didn't").to_string(), "\"didn't\"");
+    assert_eq!(
+        Literal::string("a\00b\07c\08d\0e\0").to_string(),
+        "\"a\\x000b\\x007c\\08d\\0e\\0\"",
+    );
 }
 
 #[test]
 fn literal_raw_string() {
     "r\"\r\n\"".parse::<TokenStream>().unwrap();
+
+    fn raw_string_literal_with_hashes(n: usize) -> String {
+        let mut literal = String::new();
+        literal.push('r');
+        literal.extend(iter::repeat('#').take(n));
+        literal.push('"');
+        literal.push('"');
+        literal.extend(iter::repeat('#').take(n));
+        literal
+    }
+
+    raw_string_literal_with_hashes(255)
+        .parse::<TokenStream>()
+        .unwrap();
+
+    // https://github.com/rust-lang/rust/pull/95251
+    raw_string_literal_with_hashes(256)
+        .parse::<TokenStream>()
+        .unwrap_err();
+}
+
+#[test]
+fn literal_byte_string() {
+    assert_eq!(Literal::byte_string(b"").to_string(), "b\"\"");
+    assert_eq!(
+        Literal::byte_string(b"\0\t\n\r\"\\2\x10").to_string(),
+        "b\"\\0\\t\\n\\r\\\"\\\\2\\x10\"",
+    );
+    assert_eq!(
+        Literal::byte_string(b"a\00b\07c\08d\0e\0").to_string(),
+        "b\"a\\x000b\\x007c\\08d\\0e\\0\"",
+    );
 }
 
 #[test]
@@ -96,8 +166,43 @@ fn literal_character() {
 }
 
 #[test]
+fn literal_integer() {
+    assert_eq!(Literal::u8_suffixed(10).to_string(), "10u8");
+    assert_eq!(Literal::u16_suffixed(10).to_string(), "10u16");
+    assert_eq!(Literal::u32_suffixed(10).to_string(), "10u32");
+    assert_eq!(Literal::u64_suffixed(10).to_string(), "10u64");
+    assert_eq!(Literal::u128_suffixed(10).to_string(), "10u128");
+    assert_eq!(Literal::usize_suffixed(10).to_string(), "10usize");
+
+    assert_eq!(Literal::i8_suffixed(10).to_string(), "10i8");
+    assert_eq!(Literal::i16_suffixed(10).to_string(), "10i16");
+    assert_eq!(Literal::i32_suffixed(10).to_string(), "10i32");
+    assert_eq!(Literal::i64_suffixed(10).to_string(), "10i64");
+    assert_eq!(Literal::i128_suffixed(10).to_string(), "10i128");
+    assert_eq!(Literal::isize_suffixed(10).to_string(), "10isize");
+
+    assert_eq!(Literal::u8_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::u16_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::u32_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::u64_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::u128_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::usize_unsuffixed(10).to_string(), "10");
+
+    assert_eq!(Literal::i8_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::i16_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::i32_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::i64_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::i128_unsuffixed(10).to_string(), "10");
+    assert_eq!(Literal::isize_unsuffixed(10).to_string(), "10");
+}
+
+#[test]
 fn literal_float() {
+    assert_eq!(Literal::f32_suffixed(10.0).to_string(), "10f32");
+    assert_eq!(Literal::f64_suffixed(10.0).to_string(), "10f64");
+
     assert_eq!(Literal::f32_unsuffixed(10.0).to_string(), "10.0");
+    assert_eq!(Literal::f64_unsuffixed(10.0).to_string(), "10.0");
 }
 
 #[test]
@@ -148,12 +253,57 @@ fn literal_iter_negative() {
 }
 
 #[test]
+fn literal_parse() {
+    assert!("1".parse::<Literal>().is_ok());
+    assert!("-1".parse::<Literal>().is_ok());
+    assert!("-1u12".parse::<Literal>().is_ok());
+    assert!("1.0".parse::<Literal>().is_ok());
+    assert!("-1.0".parse::<Literal>().is_ok());
+    assert!("-1.0f12".parse::<Literal>().is_ok());
+    assert!("'a'".parse::<Literal>().is_ok());
+    assert!("\"\n\"".parse::<Literal>().is_ok());
+    assert!("0 1".parse::<Literal>().is_err());
+    assert!(" 0".parse::<Literal>().is_err());
+    assert!("0 ".parse::<Literal>().is_err());
+    assert!("/* comment */0".parse::<Literal>().is_err());
+    assert!("0/* comment */".parse::<Literal>().is_err());
+    assert!("0// comment".parse::<Literal>().is_err());
+    assert!("- 1".parse::<Literal>().is_err());
+    assert!("- 1.0".parse::<Literal>().is_err());
+    assert!("-\"\"".parse::<Literal>().is_err());
+}
+
+#[test]
+fn literal_span() {
+    let positive = "0.1".parse::<Literal>().unwrap();
+    let negative = "-0.1".parse::<Literal>().unwrap();
+    let subspan = positive.subspan(1..2);
+
+    #[cfg(not(span_locations))]
+    {
+        let _ = negative;
+        assert!(subspan.is_none());
+    }
+
+    #[cfg(span_locations)]
+    {
+        assert_eq!(positive.span().start().column, 0);
+        assert_eq!(positive.span().end().column, 3);
+        assert_eq!(negative.span().start().column, 0);
+        assert_eq!(negative.span().end().column, 4);
+        assert_eq!(subspan.unwrap().source_text().unwrap(), ".");
+    }
+
+    assert!(positive.subspan(1..4).is_none());
+}
+
+#[test]
 fn roundtrip() {
     fn roundtrip(p: &str) {
         println!("parse: {}", p);
         let s = p.parse::<TokenStream>().unwrap().to_string();
         println!("first: {}", s);
-        let s2 = s.to_string().parse::<TokenStream>().unwrap().to_string();
+        let s2 = s.parse::<TokenStream>().unwrap().to_string();
         assert_eq!(s, s2);
     }
     roundtrip("a");
@@ -449,9 +599,16 @@ TokenStream [
 
 #[test]
 fn default_tokenstream_is_empty() {
-    let default_token_stream: TokenStream = Default::default();
+    let default_token_stream = <TokenStream as Default>::default();
 
     assert!(default_token_stream.is_empty());
+}
+
+#[test]
+fn tokenstream_size_hint() {
+    let tokens = "a b (c d) e".parse::<TokenStream>().unwrap();
+
+    assert_eq!(tokens.into_iter().size_hint(), (4, Some(4)));
 }
 
 #[test]
@@ -529,4 +686,17 @@ fn check_spans_internal(ts: TokenStream, lines: &mut &[(usize, usize, usize, usi
             }
         }
     }
+}
+
+#[test]
+fn byte_order_mark() {
+    let string = "\u{feff}foo";
+    let tokens = string.parse::<TokenStream>().unwrap();
+    match tokens.into_iter().next().unwrap() {
+        TokenTree::Ident(ident) => assert_eq!(ident, "foo"),
+        _ => unreachable!(),
+    }
+
+    let string = "foo\u{feff}";
+    string.parse::<TokenStream>().unwrap_err();
 }
